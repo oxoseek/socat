@@ -1,4 +1,9 @@
-删除/etc/rc.local重启即可停止中转
+## 删除
+
+```bash
+rm /etc/rc.local
+
+重启即可停止中转
 
 ## 一键安装
 
