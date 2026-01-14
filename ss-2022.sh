@@ -1137,7 +1137,7 @@ Start_Menu() {
     echo -e "${GREEN}          SS - 2022 管理脚本 ${RESET}"
     echo -e "${GREEN}============================================${RESET}"
     echo -e "${GREEN}            作者: jinqian${RESET}"
-    echo -e "${GREEN}       
+    echo -e "${GREEN}       网站：${RESET}"
     echo -e "${GREEN}============================================${RESET}"
         echo && echo -e "  
  ${Green_font_prefix}0。${Font_color_suffix} 更新脚本
@@ -1160,7 +1160,7 @@ Start_Menu() {
 ==================================" && echo
         if [[ -e ${BINARY_PATH} ]]; then
             check_status
-            if [[ "$status" == "running" ]]; then
+            if [[ "$status" == "running" ]]; 键，然后
                 echo -e " 当前状态：${Green_font_prefix}已安装${Font_color_suffix} 并 ${Green_font_prefix}已启动${Font_color_suffix}"
             else
                 echo -e " 当前状态：${Green_font_prefix}已安装${Font_color_suffix} 但 ${Red_font_prefix}未启动${Font_color_suffix}"
