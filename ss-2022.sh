@@ -1137,13 +1137,13 @@ Start_Menu() {
     echo -e "${GREEN}          SS - 2022 管理脚本 ${RESET}"
     echo -e "${GREEN}============================================${RESET}"
     echo -e "${GREEN}            作者: jinqian${RESET}"
-    echo -e "${GREEN}       网站：https://jinqians.com${RESET}"
+    echo -e "${GREEN}       
     echo -e "${GREEN}============================================${RESET}"
         echo && echo -e "  
- ${Green_font_prefix}0.${Font_color_suffix} 更新脚本
+ ${Green_font_prefix}0。${Font_color_suffix} 更新脚本
 ——————————————————————————————————
- ${Green_font_prefix}1.${Font_color_suffix} 安装 Shadowsocks Rust
- ${Green_font_prefix}2.${Font_color_suffix} 更新 Shadowsocks Rust
+ ${Green_font_prefix}1。${Font_color_suffix} 安装 Shadowsocks Rust
+ ${Green_font_prefix}2。${Font_color_suffix} 更新 Shadowsocks Rust
  ${Green_font_prefix}3.${Font_color_suffix} 卸载 Shadowsocks Rust
 ——————————————————————————————————
  ${Green_font_prefix}4.${Font_color_suffix} 启动 Shadowsocks Rust
@@ -1175,10 +1175,10 @@ Start_Menu() {
                 Update_Shell
                 ;;
             1)
-                Install
+                安装
                 ;;
             2)
-                Update
+                更新
                 ;;
             3)
                 Uninstall
