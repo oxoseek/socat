@@ -1,5 +1,8 @@
 一键ss
+
+
 wget https://raw.githubusercontent.com/oxoseek/socat/refs/heads/main/ss-2022.sh&& bash ss-2022.sh
+
 
 
 删除转发
