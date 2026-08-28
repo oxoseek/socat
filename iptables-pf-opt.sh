@@ -1,5 +1,6 @@
+cat << 'EOF' > iptables-pf-opt.sh
 #!/usr/bin/env bash
-# 极致优化版 Linux 端口转发管理 (增加快捷启动机制)
+# 极致优化版 Linux 端口转发管理 (终极版)
 
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
 export PATH
@@ -49,9 +50,10 @@ add_rule() {
 }
 
 install_shortcut() {
-    # 机制：将当前运行的脚本体复制到全局系统变量路径下，并命名为 i
     local target="/usr/local/bin/i"
     cp -f "$0" "$target"
+    # 核心机制：在生成快捷命令时，强制清洗可能残留的 Windows 换行符
+    sed -i 's/\r$//' "$target"
     chmod +x "$target"
     echo -e "[\033[32mSuccess\033[0m] 快捷命令安装完成！"
     echo -e "以后在任何目录下，直接输入 \033[33mi\033[0m 并回车，即可启动本脚本。"
@@ -105,3 +107,4 @@ case "$num" in
         exit 1
         ;;
 esac
+EOF
