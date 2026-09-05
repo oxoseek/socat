@@ -1,4 +1,3 @@
-cat << 'EOF' > iptables-pf-opt.sh
 #!/usr/bin/env bash
 # 极致优化版 Linux 端口转发管理 (终极版)
 
@@ -107,4 +106,3 @@ case "$num" in
         exit 1
         ;;
 esac
-EOF
