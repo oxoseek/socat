@@ -127,11 +127,17 @@ setup_script_permissions() {
 }
 
 setup_cron_environment() {
-    # cron 环境补全 PATH；@reboot 恢复重启丢失的 nftables 监控规则
+    # 修复破坏系统环境的 Bug：仅追加我们需要的，不再暴力删除系统的 PATH
     local current_cron=$(crontab -l 2>/dev/null || true)
     local temp_cron=$(mktemp)
-    echo "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" > "$temp_cron"
-    echo "$current_cron" | grep -v "^PATH=" | grep -v "# 端口流量狗开机自恢复" >> "$temp_cron" || true
+    
+    echo "$current_cron" | grep -v "# 端口流量狗开机自恢复" > "$temp_cron" || true
+    
+    # 如果系统尚未设置 PATH，则补充默认安全 PATH
+    if ! grep -q "^PATH=" "$temp_cron"; then
+        sed -i '1i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' "$temp_cron"
+    fi
+    
     echo "@reboot $SCRIPT_PATH --restore-monitoring >/dev/null 2>&1  # 端口流量狗开机自恢复" >> "$temp_cron"
     crontab "$temp_cron" 2>/dev/null || true
     rm -f "$temp_cron"
@@ -247,7 +253,6 @@ init_nftables() {
     local family=$(jq -r '.nftables.family' "$CONFIG_FILE")
 
     NFT_TABLE_CACHE=""
-    # 表与链已就绪时直接返回，避免无谓触发 nft add
     local existing
     existing=$(nft list table $family $table_name 2>/dev/null || true)
     if [ -n "$existing" ] \
@@ -434,7 +439,6 @@ get_beijing_month_year() {
     echo "$current_day $current_month $current_year"
 }
 
-# 任何写操作后必须清空快照缓存；MISSING 标记表不存在
 get_nft_table_dump() {
     if [ -z "${NFT_TABLE_CACHE:-}" ]; then
         local table_name=$(jq -r '.nftables.table_name' "$CONFIG_FILE")
@@ -458,7 +462,6 @@ get_nftables_counter_data() {
     local output_bytes=0
 
     if [ "$port" = "$VPS_PORT_ID" ]; then
-        # 整机伪端口按计费口径预乘（双向乘2/单向乘1）
         local vps_raw=($(get_vps_monthly_raw))
         local vps_rx=${vps_raw[0]:-0}
         local vps_tx=${vps_raw[1]:-0}
@@ -477,7 +480,6 @@ get_nftables_counter_data() {
     local in_name=$(get_counter_name "$counter_key" in)
     local out_name=$(get_counter_name "$counter_key" out)
 
-    # 兼容 nft>=1.0.x 单行与旧版分行格式；缺失按 0
     if get_nft_table_dump; then
         local parsed
         parsed=$(printf '%s\n' "$NFT_TABLE_CACHE" | awk -v in_name="$in_name" -v out_name="$out_name" '
@@ -494,13 +496,11 @@ get_nftables_counter_data() {
                 else if (cur == out_name) ob = $2
             }
             END {
-                # 保持字符串透传，数值运算会导致 awk 采用科学计数法丢失大数值精度
                 print (ib == "" ? 0 : ib), (ob == "" ? 0 : ob)
             }')
         read -r input_bytes output_bytes <<< "$parsed"
     fi
 
-    # 单向口径不返回 in 计数器
     [ "$billing_mode" != "double" ] && input_bytes=0
     echo "$input_bytes $output_bytes"
 }
@@ -509,7 +509,6 @@ save_traffic_data() {
     local temp_file=$(mktemp)
     local active_ports=($(get_active_ports 2>/dev/null || true))
 
-    # 伪端口 00 数据存 vps_traffic.json，不写入 nft 备份
     local ports_for_backup=()
     for port in "${active_ports[@]}"; do
         [ "$port" = "$VPS_PORT_ID" ] && continue
@@ -550,7 +549,6 @@ save_traffic_data_on_exit() {
 restore_monitoring_if_needed() {
     local active_ports=($(get_active_ports 2>/dev/null || true))
 
-    # 排除伪端口 00，防止误判触发全量规则重建
     local real_ports=()
     for port in "${active_ports[@]}"; do
         [ "$port" = "$VPS_PORT_ID" ] && continue
@@ -561,7 +559,6 @@ restore_monitoring_if_needed() {
         return 0
     fi
 
-    # 单次表快照校验链与规则完整性
     local need_restore=false
     if ! get_nft_table_dump; then
         need_restore=true
@@ -624,7 +621,6 @@ restore_counter_value() {
     local in_name=$(get_counter_name "$counter_key" in)
     local out_name=$(get_counter_name "$counter_key" out)
 
-    # 内核计数器优先保留；nftables 0.9.3 语法不兼容带花括号的初值
     if [ "$billing_mode" = "double" ]; then
         if ! nft_counter_exists "$in_name" \
             && ! nft add counter $family $table_name "$in_name" packets 0 bytes $target_input 2>/dev/null; then
@@ -695,7 +691,6 @@ get_port_status_label() {
     local port=$1
     local port_config=$(jq -r ".ports.\"$port\"" "$CONFIG_FILE" 2>/dev/null)
 
-    # 空 remark 注入 0x01 占位，防止 IFS 空白折叠吞掉字段
     local fields
     fields=$(printf '%s' "$port_config" | jq -r '[
         "S",
@@ -720,7 +715,7 @@ get_port_status_label() {
     local reset_day="null"
     
     if [ "$monthly_limit" != "unlimited" ] && [ "$reset_day_raw" != "null" ]; then
-        reset_day="${reset_day_raw:-1}"  # 未配置时默认为1
+        reset_day="${reset_day_raw:-1}"
     fi
 
     local status_tags=()
@@ -848,7 +843,6 @@ get_monitored_ports() {
     jq -r --arg vps "$VPS_PORT_ID" '.ports | keys[] | select(. != $vps)' "$CONFIG_FILE" 2>/dev/null | sort -n
 }
 
-# 排除 ifb 避免与物理网卡入向镜像重复计数
 list_vps_interfaces() {
     list_shaping_interfaces | grep -v "^ifb" || true
 }
@@ -885,7 +879,6 @@ vps_read_iface_raw() {
     awk -v dev="$iface:" '$1 == dev {print $2, $10}' /proc/net/dev 2>/dev/null
 }
 
-# /proc/net/dev 增量采集并累加至 monthly；lifetime_raw 为不随重置清零的基准
 collect_vps_traffic() {
     command -v jq >/dev/null 2>&1 || return 0
 
@@ -897,7 +890,6 @@ collect_vps_traffic() {
     local current_boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo "unknown")
     local now=$(get_beijing_time +%s)
 
-    # 尝试加锁 2 秒，防 cron/推送并发持锁阻塞交互
     vps_lock 2 || return 0
 
     local data=$(vps_read_data)
@@ -910,7 +902,6 @@ collect_vps_traffic() {
 
     for iface in "${ifaces[@]}"; do
         raw_line=$(vps_read_iface_raw "$iface")
-        # 网卡热插拔下线时跳过
         [ -z "$raw_line" ] && continue
 
         current_rx=$(echo "$raw_line" | awk '{print $1}')
@@ -922,15 +913,12 @@ collect_vps_traffic() {
         last_tx=$(printf '%s' "$new_data" | jq -r --arg i "$iface" '.lifetime_raw.ifaces[$i].tx_bytes // 0' 2>/dev/null || echo 0)
 
         if [ "$file_exists" = "false" ]; then
-            # 首次采集仅记录基准
             delta_rx=0
             delta_tx=0
         elif [ "$last_boot_id" != "$current_boot_id" ]; then
-            # boot_id 变更表示宿主机重启，开机至今计数全量计入本月
             delta_rx=$current_rx
             delta_tx=$current_tx
         elif [ "$current_rx" -lt "$last_rx" ] || [ "$current_tx" -lt "$last_tx" ]; then
-            # 未重启但计数回退判定为网卡重置，重校准基准
             log_notification "整机流量：网卡 $iface 计数器未重启发生回退（疑似NIC重建），已按当前值校准"
             delta_rx=$current_rx
             delta_tx=$current_tx
@@ -952,7 +940,6 @@ collect_vps_traffic() {
         .lifetime_raw.updated_at = $now |
         .monthly.reset_at = (.monthly.reset_at // $now)' 2>/dev/null) || new_data=""
 
-    # jq 成功后原子 mv 写入，防读取半包数据
     if [ -n "$new_data" ]; then
         vps_write_data "$new_data"
     else
@@ -1015,7 +1002,6 @@ validate_port_spec() {
     return 0
 }
 
-# 区间重叠校验：防止同一端口被两套规则重复统计
 check_units_overlap() {
     local intervals=() uk s e
     for uk in "$@"; do
@@ -1052,7 +1038,6 @@ normalize_unit_key() {
     for m in "${members[@]}"; do
         [ -z "$m" ] && { echo -e "${RED}错误：空端口项${NC}" >&2; return 1; }
         validate_port_spec "$m" || return 1
-        # 去前导零归一化 key，避免重复建表
         if is_port_range "$m"; then
             local se start end
             se=$(split_port_range "$m")
@@ -1102,14 +1087,11 @@ parse_monitor_units() {
     local -n _pmu_units=$2
 
     _pmu_units=()
-    # mapfile -d 保留末尾分号空字段以严格拦截非法输入
+    
+    # 修复 bash 4.4 兼容性 bug
     local raw_units=()
-    mapfile -d ';' -t raw_units <<< "$input"
-    # 去除 here-string 附加的换行符
-    local i
-    for ((i=0; i<${#raw_units[@]}; i++)); do
-        raw_units[$i]="${raw_units[$i]%$'\n'}"
-    done
+    input="${input%$'\n'}"
+    IFS=';' read -ra raw_units <<< "$input"
 
     local unit_keys=()
     local ru
@@ -1152,7 +1134,6 @@ port_selectors() {
     done
 }
 
-# 组 rule_id 限制在 [1, 0x1FFF]，避开端口段偏移 [0x2000, 0xFFFF]
 hash_port_key() {
     local key=$1 salt=${2:-0}
     local h=$salt i ch
@@ -1165,20 +1146,19 @@ hash_port_key() {
     echo $(( h == 0 ? 1 : h ))
 }
 
-# 分配唯一 rule_id (tc class)，冲突则递增 salt 重哈希
 assign_group_rule_id() {
     local key=$1
     local salt=0 id
-    local existing
-    existing=$(jq -r '[.ports[].rule_id] | map(. // empty)' "$CONFIG_FILE" 2>/dev/null || echo '[]')
+    # 修复巨量 jq 并发引发的 CPU 打满和卡死问题，改用纯 bash 内存比较
+    local existing=$(jq -r '[.ports[].rule_id] | map(select(. != null)) | join(" ")' "$CONFIG_FILE" 2>/dev/null || echo '')
+    
     while :; do
         id=$(hash_port_key "$key" "$salt")
-        if printf '%s' "$existing" | jq -e --argjson id "$id" 'index($id) == null' >/dev/null 2>&1; then
+        if [[ ! " $existing " =~ " $id " ]]; then
             echo "$id"
             return 0
         fi
         salt=$((salt + 1))
-        # bash 的 [ ] 不支持十六进制字面量，必须用十进制 8192
         if [ $salt -ge 8192 ]; then
             id=$(hash_port_key "$key" 1)
             echo "$id"
@@ -1210,18 +1190,10 @@ derive_rule_id() {
     fi
 }
 
-get_counter_name() {  # $1=counter_key $2=in|out
-    echo "port_$1_$2"
-}
-get_quota_name() {    # $1=counter_key
-    echo "port_${1}_quota"
-}
-get_expiry_name() {   # $1=counter_key，规则 comment 标识，remove/check 按此匹配
-    echo "expiry_block_$1"
-}
-get_tc_class_id() {   # $1=rule_id（数值）
-    echo "1:$(printf '%x' "$1")"
-}
+get_counter_name() { echo "port_$1_$2"; }
+get_quota_name() { echo "port_${1}_quota"; }
+get_expiry_name() { echo "expiry_block_$1"; }
+get_tc_class_id() { echo "1:$(printf '%x' "$1")"; }
 
 get_counter_key() {
     local key=$1
@@ -1243,14 +1215,12 @@ get_rule_id() {
     echo "$rid"
 }
 
-# 存量配置迁移：补齐 counter_key 与 rule_id
 migrate_ports_schema() {
     [ -f "$CONFIG_FILE" ] || return 0
     local need
     need=$(jq -r '[.ports | to_entries[] | select((.value.counter_key // null) == null)] | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
     [ "$need" -eq 0 ] && return 0
 
-    # 清洗 CRLF 换行符，避免污染 jq 参数与字符串匹配
     local keys=()
     mapfile -t keys < <(jq -r '.ports | keys[]' "$CONFIG_FILE" 2>/dev/null | tr -d '\r' || true)
 
@@ -1266,7 +1236,6 @@ migrate_ports_schema() {
     log_notification "配置已迁移到监控单元结构（counter_key + rule_id）"
 }
 
-# 通知结构迁移：补齐 api_host，重命名 webhook，清理 email
 migrate_notifications_schema() {
     [ -f "$CONFIG_FILE" ] || return 0
     local need_migrate
@@ -1277,7 +1246,6 @@ migrate_notifications_schema() {
     ' "$CONFIG_FILE" 2>/dev/null || echo "true")
     [ "$need_migrate" = "false" ] && return 0
 
-    # 单次 jq 原子迁移，避免中途失败产生中间态
     update_config '
         .notifications.telegram.api_host = (.notifications.telegram.api_host // "https://api.telegram.org")
         | .notifications.webhook = (.notifications.wecom // .notifications.webhook // {})
@@ -1302,13 +1270,12 @@ generate_port_range_mark() {
     echo $(( (start_port * 1000 + end_port) % 65536 ))
 }
 
-# 突发窗口取 10ms，下限 4*MTU 保底，上限 64KB
 calculate_tc_burst() {
     local base_rate_kbps=$1
     local rate_bytes_per_sec=$((base_rate_kbps * 1000 / 8))
-    local burst_10ms=$((rate_bytes_per_sec / 100))        # 10ms缓冲
-    local min_burst=$((4 * 1500))                          # 4个以太网MTU保底(约6KB)
-    local max_burst=$((64 * 1024))                         # 64KB最大突发上限
+    local burst_10ms=$((rate_bytes_per_sec / 100))
+    local min_burst=$((4 * 1500))
+    local max_burst=$((64 * 1024))
 
     local burst_calc=$burst_10ms
     if [ $burst_calc -lt $min_burst ]; then
@@ -1319,8 +1286,6 @@ calculate_tc_burst() {
     echo $burst_calc
 }
 
-# 协议开销与长延迟补偿：tc 按含帧头/包头的线速计数，用户测速只算有效载荷，
-# 补偿15%可在兼顾近端合理性的同时消除跨洋/长RTT链路（如美西）的重传与抖动折损
 calculate_effective_rate_kbps() {
     local target_rate_kbps=$1
     echo $(( target_rate_kbps * 115 / 100 ))
@@ -1414,14 +1379,11 @@ format_vps_traffic_line() {
         local output_formatted=$(format_bytes $output_bytes)
 
         if [ "$format_type" = "display" ]; then
-            result+="整机总流量:${GREEN}${iface}${NC} | 总流量:${GREEN}$total_formatted${NC} | 上行(入站): ${GREEN}$input_formatted${NC} | 下行(出站):${GREEN}$output_formatted${NC} | ${YELLOW}$status_label${NC}
-"
+            result+="整机总流量:${GREEN}${iface}${NC} | 总流量:${GREEN}$total_formatted${NC} | 上行(入站): ${GREEN}$input_formatted${NC} | 下行(出站):${GREEN}$output_formatted${NC} | ${YELLOW}$status_label${NC}\n"
         elif [ "$format_type" = "markdown" ]; then
-            result+="**整机总流量**:**${iface}** | **总流量**:**${total_formatted}** | **上行**:**${input_formatted}** | **下行**:**${output_formatted}** | ${status_label}
-"
+            result+="**整机总流量**:**${iface}** | **总流量**:**${total_formatted}** | **上行**:**${input_formatted}** | **下行**:**${output_formatted}** | ${status_label}\n"
         else
-            result+="整机总流量:${iface} | 总流量:${total_formatted} | 上行(入站): ${input_formatted} | 下行(出站):${output_formatted} | ${status_label}
-"
+            result+="整机总流量:${iface} | 总流量:${total_formatted} | 上行(入站): ${input_formatted} | 下行(出站):${output_formatted} | ${status_label}\n"
         fi
     done
 
@@ -1448,16 +1410,14 @@ format_port_list() {
         if [ "$format_type" = "display" ]; then
             echo -e "${GREEN}$(get_port_display_name "$port")${NC} | 总流量:${GREEN}$total_formatted${NC} | 上行(入站): ${GREEN}$input_formatted${NC} | 下行(出站):${GREEN}$output_formatted${NC} | ${YELLOW}$status_label${NC}"
         elif [ "$format_type" = "markdown" ]; then
-            result+="> **$(get_port_display_name "$port")** | 总流量:**${total_formatted}** | 上行:**${input_formatted}** | 下行:**${output_formatted}** | ${status_label}
-"
+            result+="> **$(get_port_display_name "$port")** | 总流量:**${total_formatted}** | 上行:**${input_formatted}** | 下行:**${output_formatted}** | ${status_label}\n"
         else
-            result+="
-$(get_port_display_name "$port") | 总流量:${total_formatted} | 上行(入站): ${input_formatted} | 下行(出站):${output_formatted} | ${status_label}"
+            result+="\n$(get_port_display_name "$port") | 总流量:${total_formatted} | 上行(入站): ${input_formatted} | 下行(出站):${output_formatted} | ${status_label}"
         fi
     done
 
     if [ "$format_type" = "message" ] || [ "$format_type" = "markdown" ]; then
-        echo "$result"
+        echo -e "$result"
     fi
 }
 
@@ -1468,7 +1428,6 @@ show_main_menu() {
     local port_count=${#active_ports[@]}
     local daily_total=$(get_daily_total_traffic)
     collect_vps_traffic
-
 
     echo
 
@@ -2282,7 +2241,6 @@ apply_nftables_quota() {
     local port=$1
     local quota_limit=$2
 
-    # 整机配额仅监控告警，不做内核 drop 阻断以防锁死 SSH
     [ "$port" = "$VPS_PORT_ID" ] && return 0
 
     NFT_TABLE_CACHE=""
@@ -2294,7 +2252,6 @@ apply_nftables_quota() {
 
     local quota_bytes=$(parse_size_to_bytes "$quota_limit")
 
-    # 以当前已用量作为配额初始 offset，防止配额修改立即误阻断
     local current_traffic=($(get_nftables_counter_data "$port"))
     local current_input=${current_traffic[0]}
     local current_output=${current_traffic[1]}
@@ -2365,8 +2322,6 @@ remove_nftables_quota() {
 
     nft delete quota $family $table_name "$quota_name" 2>/dev/null || true
 }
-
-# 排除回环/ifb/容器虚拟网桥/隧道网卡
 
 validate_expiry_date() {
     local input="$1"
@@ -2539,7 +2494,6 @@ check_and_apply_expiry() {
     local counter_key=$(get_counter_key "$port")
     local expiry_comment=$(get_expiry_name "$counter_key")
 
-    # 避免 grep -q 早退触发 nft SIGPIPE (pipefail 退出码 141)
     local is_blocked=false
     local block_count
     block_count=$(nft list table $family $table_name 2>/dev/null | grep -c "comment \"$expiry_comment\"" || true)
@@ -2583,14 +2537,12 @@ get_vps_tc_ceiling() {
     fi
 }
 
-# default 类 0x30 与端口 48 同号；端口 48 存在时不创建 1:30 避免冲突
 vps_default_class_in_use() {
     local enabled=$(jq -r '.ports."48".bandwidth_limit.enabled // false' "$CONFIG_FILE" 2>/dev/null || echo false)
     local rate=$(jq -r '.ports."48".bandwidth_limit.rate // "unlimited"' "$CONFIG_FILE" 2>/dev/null || echo unlimited)
     [ "$enabled" = "true" ] && [ "$rate" != "unlimited" ]
 }
 
-# 整机限速压父类 1:1，端口子类速率自动与整机取 min
 apply_vps_tc_limit() {
     local total_limit=$1
 
@@ -2619,13 +2571,11 @@ apply_vps_tc_limit() {
     done
     [ $ok_count -eq 0 ] && return 1
 
-    # 整机入向限速建立 ifb0 链路
     if ! ip link show ifb0 >/dev/null 2>&1; then
         modprobe ifb numifbs=1 2>/dev/null || true
         ip link add ifb0 type ifb 2>/dev/null || true
         ip link set ifb0 up 2>/dev/null || true
     fi
-    # ifb 为 NOARP 设备，operstate 恒为 UNKNOWN，仅检测 UP flag
     if ! ip link show ifb0 2>/dev/null | grep -q "<.*UP.*>"; then
         log_notification "ifb0 创建失败，整机入向限速未生效"
         return 0
@@ -2635,7 +2585,6 @@ apply_vps_tc_limit() {
         if ! tc qdisc show dev $dev 2>/dev/null | grep -q "^qdisc ingress"; then
             tc qdisc add dev $dev handle ffff: ingress 2>/dev/null || true
         fi
-        # 重定向规则只装一次，避免规则叠加
         if ! tc filter show dev $dev parent ffff: 2>/dev/null | grep -q "mirred.*ifb0"; then
             tc filter add dev $dev parent ffff: protocol ip u32 match u32 0 0 \
                 action mirred egress redirect dev ifb0 2>/dev/null || true
@@ -2651,7 +2600,6 @@ apply_vps_tc_limit() {
     return 0
 }
 
-# 解除整机限速；若无端口限速则拆除 ifb 避免常驻耗 CPU
 remove_vps_tc_limit() {
     local dev
     local default_busy=false
@@ -2700,7 +2648,6 @@ apply_tc_limit() {
         return $?
     fi
 
-    # 已有根 qdisc 时 add 静默失败，已有 htb 时 replace 无法生效，须先探测再建
     local root_rate="100gbit"
     local vps_ceiling=$(get_vps_tc_ceiling)
     [ -n "$vps_ceiling" ] && root_rate="$vps_ceiling"
@@ -2714,7 +2661,6 @@ apply_tc_limit() {
     done
 
     local class_id=$(generate_tc_class_id "$port")
-    # 变更限速档位须先拆后建，避免 class 被引用导致删除失败
     remove_egress_filters "$port"
 
     local raw_rate_kbps=$(parse_tc_rate_to_kbps "$total_limit")
@@ -2741,7 +2687,6 @@ apply_tc_limit() {
     return 0
 }
 
-# 出向分类器：单端口 u32 直配，端口段匹配 fw mark
 add_egress_filters() {
     local dev=$1
     local port=$2
@@ -2814,7 +2759,6 @@ remove_egress_filters() {
     done
 }
 
-# 检测内核 CAKE 支持（模块或内建）
 check_cake_support() {
     if modprobe sch_cake 2>/dev/null; then
         return 0
@@ -2831,7 +2775,6 @@ attach_leaf_qdisc() {
     local class_id=$2
     local rate_kbps=$3
 
-    # 优先 CAKE (带 ack-filter)，不支持时回退 fq_codel
     if check_cake_support && tc qdisc replace dev "$dev" parent "$class_id" cake bandwidth "${rate_kbps}kbit" ethernet ack-filter 2>/dev/null; then
         return 0
     fi
@@ -2839,7 +2782,6 @@ attach_leaf_qdisc() {
     tc qdisc replace dev "$dev" parent "$class_id" fq_codel 2>/dev/null || true
 }
 
-# 入向流量经 ifb0 镜像重定向借用出向整形
 apply_ingress_shaping() {
     local port=$1
     local total_limit=$2
@@ -2849,19 +2791,16 @@ apply_ingress_shaping() {
         ip link add ifb0 type ifb 2>/dev/null || true
         ip link set ifb0 up 2>/dev/null || true
     fi
-    # ifb 为 NOARP 设备，operstate 恒为 UNKNOWN，仅检测 UP flag
     if ! ip link show ifb0 2>/dev/null | grep -q "<.*UP.*>"; then
         log_notification "ifb0 创建失败，端口 $port 入向限速未生效"
         return 1
     fi
 
-    # 所有非 lo 网卡挂 ingress；qdisc show 判据须过滤 ingress 行
     local dev
     for dev in $(list_shaping_interfaces); do
         if ! tc qdisc show dev $dev 2>/dev/null | grep -q "^qdisc ingress"; then
             tc qdisc add dev $dev handle ffff: ingress 2>/dev/null || true
         fi
-        # 重定向规则只装一次，避免规则叠加
         if ! tc filter show dev $dev parent ffff: 2>/dev/null | grep -q "mirred.*ifb0"; then
             tc filter add dev $dev parent ffff: protocol ip u32 match u32 0 0 \
                 action mirred egress redirect dev ifb0 2>/dev/null || true
@@ -2879,7 +2818,6 @@ apply_ingress_shaping() {
     tc class replace dev ifb0 parent 1: classid 1:1 htb rate $ifb_root_rate 2>/dev/null || true
 
     local class_id=$(generate_tc_class_id "$port")
-    # 拆除须按 filter -> leaf -> class 顺序，防 class 被引用报错
     remove_ingress_filters "$port"
     tc qdisc del dev ifb0 parent $class_id 2>/dev/null || true
     tc class del dev ifb0 classid $class_id 2>/dev/null || true
@@ -2975,7 +2913,6 @@ remove_ingress_shaping() {
         return 0
     fi
 
-    # ifb0 无限速类时连同各网卡 ingress 根一并拆除
     if [ "$(tc class show dev ifb0 2>/dev/null | grep -c "parent 1:1" || true)" -eq 0 ]; then
         local dev
         for dev in $(list_shaping_interfaces); do
@@ -3006,7 +2943,6 @@ remove_tc_limit() {
 
     remove_ingress_shaping "$port"
 
-    # 无限速类时还原各网卡 htb 根
     for dev in $(list_shaping_interfaces); do
         remaining=$((remaining + $(tc class show dev $dev 2>/dev/null | grep -c "parent 1:1" || true)))
     done
@@ -3389,10 +3325,8 @@ import_config() {
         return
     fi
 
-    
     tar -xzf "$package_path" 2>/dev/null
 
-    
     local config_dir_name=$(ls | head -n1)
     if [ ! -d "$config_dir_name" ]; then
         echo -e "${RED}错误：配置包结构异常${NC}"
@@ -3424,7 +3358,6 @@ import_config() {
     local import_ports=$(jq -r '.ports | keys | join(", ")' "$extracted_config/config.json" 2>/dev/null || echo "无")
     echo "包含端口: $import_ports"
     echo
-
     
     echo -e "${YELLOW}警告：导入配置将会：${NC}"
     echo "  1. 停止当前所有端口监控"
@@ -3450,21 +3383,17 @@ import_config() {
         remove_nftables_rules "$port" 2>/dev/null || true
         remove_tc_limit "$port" 2>/dev/null || true
     done
-
     
     echo "正在导入新配置..."
     rm -rf "$CONFIG_DIR" 2>/dev/null || true
     mkdir -p "$(dirname "$CONFIG_DIR")"
     cp -r "$extracted_config" "$CONFIG_DIR"
-
     
     echo "正在重新应用监控规则..."
-
     
     init_nftables
 
     ensure_vps_port_config
-
     
     local new_ports=($(get_active_ports))
     for port in "${new_ports[@]}"; do
@@ -3475,7 +3404,6 @@ import_config() {
         if [ "$quota_enabled" = "true" ] && [ "$monthly_limit" != "unlimited" ]; then
             apply_nftables_quota "$port" "$monthly_limit"
         fi
-
         
         local limit_enabled=$(jq -r ".ports.\"$port\".bandwidth_limit.enabled // false" "$CONFIG_FILE")
         local rate_limit=$(jq -r ".ports.\"$port\".bandwidth_limit.rate // \"unlimited\"" "$CONFIG_FILE")
@@ -3853,13 +3781,15 @@ remove_port_auto_reset_cron() {
 }
 
 format_status_message() {
-    local server_name="${1:-$(hostname)}"  # 接受服务器名称参数
+    local server_name="${1:-$(hostname)}"
     local timestamp=$(get_beijing_time '+%Y-%m-%d %H:%M:%S')
     local notification_icon="🔔"
     local active_ports=($(get_monitored_ports))
     local port_count=${#active_ports[@]}
     local daily_total=$(get_daily_total_traffic)
 
+    # 修复未赋值的致命报错
+    local message="
 ---
 $(format_vps_traffic_line "plain")
 状态: 监控中 | 监控项: ${port_count}个 | 端口总流量: ${daily_total}
@@ -3879,7 +3809,8 @@ format_text_status_message() {
     local port_count=${#active_ports[@]}
     local daily_total=$(get_daily_total_traffic)
 
- 
+    # 修复未赋值的致命报错
+    local message="
 ---
 $(format_vps_traffic_line "plain")
 状态: 监控中 | 监控项: ${port_count}个 | 端口总流量: ${daily_total}
@@ -3899,7 +3830,8 @@ format_markdown_status_message() {
     local port_count=${#active_ports[@]}
     local daily_total=$(get_daily_total_traffic)
 
-
+    # 修复未赋值的致命报错
+    local message="
 ---
 $(format_vps_traffic_line "markdown")
 **状态**: 监控中 | **监控项**: ${port_count}个 | **端口总流量**: ${daily_total}
